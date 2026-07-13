@@ -1,3 +1,4 @@
+
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -39,6 +40,7 @@ export class TenantService {
         id: true,
         name: true,
         category: true,
+        email: true,
       },
     });
   }

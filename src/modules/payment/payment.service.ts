@@ -13,12 +13,21 @@ export class PaymentService {
     private readonly request: any,
   ) {}
 
-  async getHistory(userId: string): Promise<Payment[]> {
-    // userId ici correspond au `sub` du JWT, c'est à dire le globalId = customer_id
-    return this.orderRepo.find({ 
-      where: { customerId: userId }, 
-      order: { createdAt: 'DESC' } 
+  /** Historique des factures du tenant (gym) dans Doppa. */
+  async getTenantInvoices(limit = 20): Promise<Payment[]> {
+    const tenantId = this.request.tenantId as string | undefined;
+    if (!tenantId) return [];
+    return this.orderRepo.find({
+      where: { customerId: tenantId },
+      order: { createdAt: 'DESC' },
+      take: limit,
     });
+  }
+
+  /** @deprecated La table orders lie customer_id au tenant, pas à l'utilisateur.
+   *  Utiliser getTenantInvoices() pour récupérer les factures. */
+  async getHistory(_userId: string): Promise<Payment[]> {
+    return this.getTenantInvoices();
   }
 
   // Création désactivée dans le BFF Mobile. Laissons le backend Laravel gérer Stripe/Paiements

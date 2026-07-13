@@ -27,6 +27,10 @@ export class TenantController {
     return this.tenantService.registerTenant(dto);
   }
 
+  /**
+   * Lists active tenants — public endpoint needed for TenantSelectionScreen
+   * before the user authenticates. Returns minimal fields only: id, name, category.
+   */
   @Get()
   async list() {
     return this.tenantService.getTenants();

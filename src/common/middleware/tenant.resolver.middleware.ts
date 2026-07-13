@@ -69,7 +69,6 @@ export class TenantResolverMiddleware implements NestMiddleware {
       if (
         path === '/health' ||
         path === '/api/v1/health' ||
-        path.startsWith('/api/v1/auth/register-tenant') ||
         path.startsWith('/api/v1/tenant') ||
         path.startsWith('/api/v1/analytics/central')
       ) {

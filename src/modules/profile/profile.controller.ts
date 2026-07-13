@@ -10,7 +10,7 @@ export class ProfileController {
 
   @Get('me')
   async getMyProfile(@ActiveUser() user: ActiveUserData) {
-    return this.profileService.getProfile(user.sub);
+    return this.profileService.getProfileDto(user.sub);
   }
 
   @Put('me')

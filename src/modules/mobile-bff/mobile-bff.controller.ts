@@ -12,4 +12,10 @@ export class MobileBffController {
   async getDashboard(@ActiveUser() user: ActiveUserData) {
     return this.bffService.getDashboardPayload(user.sub);
   }
+
+  /** Facturation : abonnement (plan) du tenant + historique des factures */
+  @Get('billing')
+  async getBilling() {
+    return this.bffService.getBillingPayload();
+  }
 }

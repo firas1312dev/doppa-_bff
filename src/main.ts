@@ -1,9 +1,22 @@
 import { NestFactory } from '@nestjs/core';
-import { VersioningType, ValidationPipe } from '@nestjs/common';
+import { VersioningType, ValidationPipe, Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { CentralizedExceptionFilter } from './common/filters/centralized-exception.filter';
 
+const INSECURE_DEFAULTS = ['super-secret-jwt-key-2026', 'changeme', 'secret'];
+
 async function bootstrap() {
+  const logger = new Logger('Bootstrap');
+
+  const jwtSecret = process.env.JWT_SECRET ?? '';
+  if (!jwtSecret || INSECURE_DEFAULTS.includes(jwtSecret)) {
+    if (process.env.NODE_ENV === 'production') {
+      logger.error('FATAL: JWT_SECRET is missing or set to an insecure default. Refusing to start in production.');
+      process.exit(1);
+    }
+    logger.warn('WARNING: JWT_SECRET is using an insecure default value. Set a strong secret before deploying to production.');
+  }
+
   const app = await NestFactory.create(AppModule);
 
   // Enable CORS - allow any localhost origin in development

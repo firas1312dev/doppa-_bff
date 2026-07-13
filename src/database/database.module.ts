@@ -7,8 +7,22 @@ import { UserProfile } from '../modules/profile/entities/user-profile.entity';
 import { Subscription } from '../modules/subscription/entities/subscription.entity';
 import { Plan } from '../modules/subscription/entities/plan.entity';
 import { Payment } from '../modules/payment/entities/payment.entity';
+import { Admin } from '../modules/auth/entities/admin.entity';
+import { RefreshToken } from '../modules/auth/entities/refresh-token.entity';
+import { PasswordReset } from '../modules/auth/entities/password-reset.entity';
+import { CheckIn } from '../modules/checkins/entities/checkin.entity';
+import { ClassSchedule } from '../modules/class-schedules/entities/class-schedule.entity';
+import { ClassBooking } from '../modules/bookings/entities/class-booking.entity';
+import { Notification } from '../modules/notifications/entities/notification.entity';
+import { CentralMetric } from '../modules/analytics/entities/central-metric.entity';
 
-const ALL_ENTITIES = [Tenant, TenantUser, UserProfile, Subscription, Plan, Payment];
+const ALL_ENTITIES = [
+  Tenant, TenantUser, UserProfile, Subscription, Plan, Payment, Admin,
+  RefreshToken, PasswordReset,
+  CheckIn, ClassSchedule, ClassBooking,
+  Notification,
+  CentralMetric,
+];
 
 @Global()
 @Module({
