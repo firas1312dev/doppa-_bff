@@ -70,7 +70,17 @@ export class TenantResolverMiddleware implements NestMiddleware {
         path === '/health' ||
         path === '/api/v1/health' ||
         path.startsWith('/api/v1/tenant') ||
-        path.startsWith('/api/v1/analytics/central')
+        path.startsWith('/api/v1/analytics/central') ||
+        // Téléchargement CSV public (autorisation via ?token= signé)
+        path.startsWith('/api/v1/admin/members/export/download') ||
+        // Login téléphone / admin sans salle pré-sélectionnée
+        path === '/api/v1/auth/login' ||
+        path === '/api/v1/auth/users/login' ||
+        path === '/api/v1/auth/login-phone' ||
+        path === '/api/v1/auth/admins/login' ||
+        path === '/api/v1/auth/owners/login' ||
+        path === '/api/v1/auth/forgot-password' ||
+        path === '/api/v1/auth/reset-password'
       ) {
         return next();
       }

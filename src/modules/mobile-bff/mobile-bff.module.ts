@@ -7,6 +7,7 @@ import { PaymentModule } from '../payment/payment.module';
 import { CheckInsModule } from '../checkins/checkins.module';
 import { ClassSchedulesModule } from '../class-schedules/class-schedules.module';
 import { BookingsModule } from '../bookings/bookings.module';
+import { AdminModule } from '../admin/admin.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { BookingsModule } from '../bookings/bookings.module';
     CheckInsModule,
     ClassSchedulesModule,
     BookingsModule,
+    AdminModule,
   ],
   controllers: [MobileBffController],
   providers: [MobileBffService],

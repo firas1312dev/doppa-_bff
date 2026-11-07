@@ -13,6 +13,12 @@ export class MobileBffController {
     return this.bffService.getDashboardPayload(user.sub);
   }
 
+  /** Infos de la salle : adresse, téléphone, horaires (pour l'itinéraire) */
+  @Get('gym')
+  async getGym() {
+    return this.bffService.getGymInfoPayload();
+  }
+
   /** Facturation : abonnement (plan) du tenant + historique des factures */
   @Get('billing')
   async getBilling() {

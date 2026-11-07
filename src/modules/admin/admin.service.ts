@@ -1,9 +1,10 @@
 import {
-  Injectable, Logger, NotFoundException, ConflictException, Inject, Scope,
+  Injectable, Logger, NotFoundException, ConflictException, UnauthorizedException, Inject, Scope,
 } from '@nestjs/common';
 import { REQUEST } from '@nestjs/core';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { JwtService } from '@nestjs/jwt';
 import { randomUUID } from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { UserProfile } from '../profile/entities/user-profile.entity';
@@ -38,6 +39,7 @@ export class AdminService {
     @Inject(REQUEST)
     private readonly request: { tenantId?: string },
     private readonly tenantMembersService: TenantMembersService,
+    private readonly jwtService: JwtService,
   ) {}
 
   private get tenantId(): string {
@@ -49,11 +51,16 @@ export class AdminService {
 
   // ─── List ────────────────────────────────────────────────────────────────────
 
-  async getMembers(page = 1, limit = 15, search?: string) {
+  async getMembers(
+    page = 1,
+    limit = 15,
+    search?: string,
+    status: 'all' | 'active' | 'inactive' = 'all',
+  ) {
     const tenantId = this.tenantId;
 
     // Source principale : base dédiée de la salle (comme le dashboard web Laravel)
-    const tenantResult = await this.tenantMembersService.listMembers(tenantId, page, limit, search);
+    const tenantResult = await this.tenantMembersService.listMembers(tenantId, page, limit, search, status);
     if (tenantResult !== null) {
       return {
         data: tenantResult.data,
@@ -67,12 +74,116 @@ export class AdminService {
     }
 
     // Repli : membres liés dans la base centrale (salles sans base dédiée)
-    return this.getCentralMembers(page, limit, search);
+    return this.getCentralMembers(page, limit, search, status);
   }
 
-  private async getCentralMembers(page: number, limit: number, search?: string) {
-    const skip = (page - 1) * limit;
+  /** Export CSV de tous les membres correspondant au filtre (salle du contexte courant). */
+  async exportMembersCsv(
+    search?: string,
+    status: 'all' | 'active' | 'inactive' = 'all',
+  ): Promise<{ csv: string; count: number; filename: string }> {
+    return this.buildMembersCsv(this.tenantId, search, status);
+  }
+
+  /**
+   * Génère un jeton de téléchargement court (5 min) permettant d'ouvrir le CSV
+   * dans le navigateur du téléphone → produit un vrai fichier .csv téléchargé.
+   */
+  generateExportToken(
+    search?: string,
+    status: 'all' | 'active' | 'inactive' = 'all',
+  ): { token: string; filename: string } {
     const tenantId = this.tenantId;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const token = this.jwtService.sign(
+      {
+        tid: tenantId,
+        search: search?.trim() || null,
+        status,
+        purpose: 'members-export',
+      },
+      { expiresIn: '5m' },
+    );
+    return { token, filename: `membres_${stamp}.csv` };
+  }
+
+  /** Vérifie un jeton de téléchargement et construit le CSV correspondant. */
+  async buildCsvFromToken(
+    token: string,
+  ): Promise<{ csv: string; count: number; filename: string }> {
+    let payload: {
+      tid?: string;
+      search?: string | null;
+      status?: 'all' | 'active' | 'inactive';
+      purpose?: string;
+    };
+    try {
+      payload = this.jwtService.verify(token);
+    } catch {
+      throw new UnauthorizedException('Lien de téléchargement invalide ou expiré.');
+    }
+    if (payload.purpose !== 'members-export' || !payload.tid) {
+      throw new UnauthorizedException('Jeton de téléchargement invalide.');
+    }
+    return this.buildMembersCsv(
+      payload.tid,
+      payload.search ?? undefined,
+      payload.status ?? 'all',
+    );
+  }
+
+  private async buildMembersCsv(
+    tenantId: string,
+    search?: string,
+    status: 'all' | 'active' | 'inactive' = 'all',
+  ): Promise<{ csv: string; count: number; filename: string }> {
+    let members = await this.tenantMembersService.exportMembers(tenantId, search, status);
+    if (members === null) {
+      const central = await this.getCentralMembers(1, 100000, search, status, tenantId);
+      members = central.data as GymMemberDto[];
+    }
+
+    const header = ['Numéro', 'Prénom', 'Nom', 'Email', 'Téléphone', 'Statut', 'Actif'];
+    const escape = (val: unknown): string => {
+      const s = val == null ? '' : String(val);
+      if (/[",\n;]/.test(s)) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    };
+
+    const lines = [header.join(',')];
+    for (const m of members) {
+      lines.push(
+        [
+          m.memberId ?? '',
+          m.firstName ?? '',
+          m.lastName ?? '',
+          m.email ?? '',
+          m.phoneNumber ?? '',
+          m.status ?? (m.isActive ? 'Active' : 'Inactive'),
+          m.isActive ? 'Oui' : 'Non',
+        ]
+          .map(escape)
+          .join(','),
+      );
+    }
+
+    // BOM pour qu'Excel lise correctement l'UTF-8 (accents)
+    const csv = '\uFEFF' + lines.join('\r\n');
+    const stamp = new Date().toISOString().slice(0, 10);
+    return { csv, count: members.length, filename: `membres_${stamp}.csv` };
+  }
+
+  private async getCentralMembers(
+    page: number,
+    limit: number,
+    search?: string,
+    status: 'all' | 'active' | 'inactive' = 'all',
+    tenantIdOverride?: string,
+  ) {
+    const skip = (page - 1) * limit;
+    const tenantId = tenantIdOverride ?? this.tenantId;
     const { ownerEmail } = await this.tenantMembersService.resolveTenantDatabase(tenantId);
 
     const qb = this.userRepo
@@ -91,6 +202,12 @@ export class AdminService {
         '(u.first_name LIKE :q OR u.last_name LIKE :q OR u.email LIKE :q)',
         { q },
       );
+    }
+
+    if (status === 'active') {
+      qb.andWhere('u.is_active = 1');
+    } else if (status === 'inactive') {
+      qb.andWhere('(u.is_active = 0 OR u.is_active IS NULL)');
     }
 
     const [rows, total] = await qb

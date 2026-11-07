@@ -1,10 +1,12 @@
-import { Injectable, Logger, Scope } from '@nestjs/common';
+import { Injectable, Logger, Scope, Inject } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
 import { ProfileService } from '../profile/profile.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { PaymentService } from '../payment/payment.service';
 import { CheckInsService } from '../checkins/checkins.service';
 import { ClassSchedulesService } from '../class-schedules/class-schedules.service';
 import { BookingsService } from '../bookings/bookings.service';
+import { TenantMembersService } from '../admin/tenant-members.service';
 
 @Injectable({ scope: Scope.REQUEST })
 export class MobileBffService {
@@ -17,6 +19,8 @@ export class MobileBffService {
     private readonly checkInsService: CheckInsService,
     private readonly classSchedulesService: ClassSchedulesService,
     private readonly bookingsService: BookingsService,
+    private readonly tenantMembersService: TenantMembersService,
+    @Inject(REQUEST) private readonly request: any,
   ) {}
 
   async getDashboardPayload(userId: string) {
@@ -49,7 +53,19 @@ export class MobileBffService {
     const activeSub = (subscriptions as { status?: string; plan?: { label?: string }; startsAt?: unknown; endsAt?: unknown; trialEndsAt?: unknown }[])
       .find(s => s.status === 'active') ?? subscriptions[0] ?? null;
 
+    let gymName: string | null = null;
+    const tenantId = this.request?.tenantId;
+    if (tenantId) {
+      try {
+        const resolved = await this.tenantMembersService.resolveTenantDatabase(tenantId);
+        gymName = resolved.gymName;
+      } catch (err) {
+        this.logger.warn(`Error resolving gym name: ${(err as Error).message}`);
+      }
+    }
+
     return {
+      gymName,
       user: profile
         ? {
             id: profile.globalId,
@@ -58,6 +74,7 @@ export class MobileBffService {
             lastName: profile.lastName,
             phoneNumber: profile.phoneNumber,
             status: profile.status,
+            gymName,
           }
         : null,
       subscription: activeSub
@@ -71,6 +88,39 @@ export class MobileBffService {
       stats: checkInStats,
       upcomingClasses,
       recentBookings,
+    };
+  }
+
+  async getGymInfoPayload() {
+    const tenantId = this.request?.tenantId;
+    if (!tenantId) {
+      return { gym: null };
+    }
+
+    const info = await this.tenantMembersService.getGymInfo(tenantId).catch(err => {
+      this.logger.warn(`Error loading gym info: ${err.message}`);
+      return null;
+    });
+
+    if (!info) {
+      return { gym: null };
+    }
+
+    const mapsQuery = [info.name, info.formattedAddress]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+
+    return {
+      gym: {
+        name: info.name,
+        phone: info.phone,
+        email: info.email,
+        address: info.address,
+        formattedAddress: info.formattedAddress,
+        openingTimes: info.openingTimes,
+        mapsQuery: mapsQuery || null,
+      },
     };
   }
 

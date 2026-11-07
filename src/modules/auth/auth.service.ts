@@ -10,7 +10,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { REQUEST } from '@nestjs/core';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan } from 'typeorm';
+import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
@@ -22,6 +22,7 @@ import { Admin } from './entities/admin.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { PasswordReset } from './entities/password-reset.entity';
 import { verifyPassword } from '../../common/utils/password.util';
+import { normalizePhone, phoneSqlExpr } from '../../common/utils/phone.util';
 import { TenantMembersService } from '../admin/tenant-members.service';
 
 @Injectable({ scope: Scope.REQUEST })
@@ -51,7 +52,7 @@ export class AuthService {
     const accessToken = this.jwtService.sign(payload);
     const refreshTokenValue = uuidv4();
     const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 30); // 30-day refresh token
+    expiresAt.setDate(expiresAt.getDate() + 30);
 
     const refreshTokenEntity = this.refreshTokenRepo.create({
       userId,
@@ -64,8 +65,14 @@ export class AuthService {
     return { accessToken, refreshTokenEntity, refreshToken: refreshTokenValue };
   }
 
+  /** Legacy email login (nécessite X-Tenant-ID). */
   async login(email: string, pass: string) {
     const tenantId = this.request.tenantId;
+    if (!tenantId) {
+      throw new UnauthorizedException(
+        'Utilisez le login par téléphone, ou fournissez une salle.',
+      );
+    }
     const normalizedEmail = email.trim().toLowerCase();
 
     const user = await this.resolveMemberForLogin(tenantId, normalizedEmail, pass);
@@ -82,6 +89,91 @@ export class AuthService {
       throw new UnauthorizedException('Ce compte n\'est pas inscrit dans cette salle.');
     }
 
+    return this.issueMemberTokens(user, tenantId);
+  }
+
+  /**
+   * Login mobile principal : téléphone + mot de passe.
+   * - Membre trouvé → connexion auto à la salle
+   * - Numéro inconnu → session VISITOR
+   * - Numéro connu mais mauvais MDP → erreur
+   */
+  async loginByPhone(phone: string, pass: string) {
+    const normalized = normalizePhone(phone);
+    if (!normalized || normalized.length < 6) {
+      throw new BadRequestException('Numéro de téléphone invalide.');
+    }
+    if (!pass?.trim()) {
+      throw new BadRequestException('Mot de passe requis.');
+    }
+
+    const phoneExpr = phoneSqlExpr('phone_number');
+    const centralRows = await this.userRepo.manager.query(
+      `SELECT * FROM users
+       WHERE deleted_at IS NULL AND is_active = 1
+         AND phone_number IS NOT NULL AND phone_number <> ''
+         AND ${phoneExpr} = ?
+       LIMIT 1`,
+      [normalized],
+    );
+    const centralRow = centralRows?.[0];
+
+    if (centralRow) {
+      const passwordOk = await verifyPassword(pass, centralRow.password);
+      if (!passwordOk) {
+        throw new UnauthorizedException('Identifiants incorrects.');
+      }
+
+      const central = await this.userRepo.findOne({
+        where: { globalId: centralRow.global_id },
+      });
+      if (!central) {
+        return this.issueVisitorSession(normalized);
+      }
+
+      const memberships = await this.tenantUserRepo.find({
+        where: { globalUserId: central.globalId },
+      });
+      const membership = memberships[memberships.length - 1];
+
+      if (membership) {
+        const tenant = await this.tenantRepo.findOne({
+          where: { id: membership.tenantId, status: 'Active' },
+        });
+        if (tenant) {
+          return this.issueMemberTokens(central, tenant.id, tenant.name);
+        }
+      }
+
+      return this.issueVisitorSession(normalized, central.firstName, central.lastName);
+    }
+
+    const tenantLookup = await this.tenantMembersService.lookupMemberByPhoneAcrossTenants(
+      phone,
+      pass,
+    );
+
+    if (tenantLookup.status === 'authenticated') {
+      return this.issueMemberTokens(
+        tenantLookup.user,
+        tenantLookup.tenantId,
+        tenantLookup.gymName,
+      );
+    }
+
+    if (tenantLookup.status === 'wrong_password') {
+      throw new UnauthorizedException('Identifiants incorrects.');
+    }
+
+    // Numéro inconnu dans toutes les salles → visiteur
+    return this.issueVisitorSession(normalized);
+  }
+
+  private async issueMemberTokens(
+    user: UserProfile,
+    tenantId: string,
+    gymName?: string | null,
+  ) {
     const payload = {
       sub: user.globalId,
       email: user.email,
@@ -97,23 +189,53 @@ export class AuthService {
     );
     await this.refreshTokenRepo.save(refreshTokenEntity);
 
+    let resolvedGymName = gymName ?? null;
+    if (!resolvedGymName) {
+      const tenant = await this.tenantRepo.findOne({ where: { id: tenantId } });
+      resolvedGymName = tenant?.name ?? null;
+    }
+
     return {
       accessToken,
       refreshToken,
       expiresIn: this.configService.get<string>('JWT_EXPIRATION', '24h'),
+      role: 'MEMBER' as const,
+      tenantId,
+      gymName: resolvedGymName,
       user: {
         id: user.globalId,
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
+        phoneNumber: user.phoneNumber,
+        gymName: resolvedGymName,
       },
     };
   }
 
-  /**
-   * 1) Membre central (tenant_users) — inscription mobile ou déjà synchronisé
-   * 2) Membre web — compte uniquement dans la base tenant de la salle
-   */
+  private issueVisitorSession(
+    phoneNormalized: string,
+    firstName?: string,
+    lastName?: string,
+  ) {
+    return {
+      accessToken: null,
+      refreshToken: null,
+      expiresIn: null,
+      role: 'VISITOR' as const,
+      tenantId: null,
+      gymName: null,
+      user: {
+        id: `visitor:${phoneNormalized}`,
+        email: null,
+        firstName: firstName || 'Visiteur',
+        lastName: lastName || '',
+        phoneNumber: phoneNormalized,
+        isVisitor: true,
+      },
+    };
+  }
+
   private async resolveMemberForLogin(
     tenantId: string,
     normalizedEmail: string,
@@ -144,15 +266,23 @@ export class AuthService {
   }
 
   /**
-   * Connexion propriétaire / gérant de salle.
-   * Le propriétaire est l'utilisateur dont l'email correspond à `tenants.email`
-   * pour la salle sélectionnée (même modèle que le dashboard web gympify).
-   * Les super-admins plateforme (`admins`) restent acceptés en secours.
+   * Connexion propriétaire : résout la salle via tenants.email si pas de X-Tenant-ID.
    */
   async loginAdmin(email: string, pass: string) {
-    const tenantId = this.request.tenantId;
+    const normalizedEmail = email.trim().toLowerCase();
+    let tenantId = this.request.tenantId as string | undefined;
+
     if (!tenantId) {
-      throw new UnauthorizedException('Veuillez sélectionner une salle avant de vous connecter.');
+      const tenantByEmail = await this.tenantRepo
+        .createQueryBuilder('t')
+        .where('LOWER(t.email) = :email', { email: normalizedEmail })
+        .andWhere('t.status = :status', { status: 'Active' })
+        .getOne();
+      tenantId = tenantByEmail?.id;
+    }
+
+    if (!tenantId) {
+      return this.loginPlatformAdmin(normalizedEmail, pass);
     }
 
     const tenant = await this.tenantRepo.findOne({
@@ -162,10 +292,7 @@ export class AuthService {
       throw new UnauthorizedException('Salle introuvable ou inactive.');
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
     const ownerEmail = tenant.email?.trim().toLowerCase();
-
-    // 1) Propriétaire de salle : email utilisateur = email de la salle
     const owner = await this.userRepo.findOne({
       where: { email: normalizedEmail, isActive: true },
     });
@@ -197,6 +324,9 @@ export class AuthService {
         accessToken,
         refreshToken,
         expiresIn: this.configService.get<string>('JWT_EXPIRATION', '24h'),
+        role: 'ADMIN' as const,
+        tenantId,
+        gymName: tenant.name,
         user: {
           id: owner.globalId,
           email: owner.email,
@@ -208,12 +338,20 @@ export class AuthService {
       };
     }
 
-    // 2) Super-admin plateforme (table `admins`) — accès transversal
-    const admin = await this.adminRepo.findOne({ where: { email: normalizedEmail, isActive: true } });
+    return this.loginPlatformAdmin(normalizedEmail, pass, tenantId, tenant.name);
+  }
+
+  private async loginPlatformAdmin(
+    normalizedEmail: string,
+    pass: string,
+    tenantId?: string,
+    gymName?: string,
+  ) {
+    const admin = await this.adminRepo.findOne({
+      where: { email: normalizedEmail, isActive: true },
+    });
     if (!admin) {
-      throw new UnauthorizedException(
-        'Identifiants incorrects. Utilisez l\'email du propriétaire de la salle sélectionnée.',
-      );
+      throw new UnauthorizedException('Identifiants incorrects.');
     }
 
     const isPasswordValid = await verifyPassword(pass, admin.password);
@@ -221,20 +359,27 @@ export class AuthService {
       throw new UnauthorizedException('Identifiants incorrects.');
     }
 
+    const resolvedTenantId = tenantId ?? this.request.tenantId;
+    if (!resolvedTenantId) {
+      throw new UnauthorizedException(
+        'Super-admin : connectez-vous avec l\'email propriétaire de la salle.',
+      );
+    }
+
     const payload = {
       sub: String(admin.id),
       email: admin.email,
-      tenantId,
+      tenantId: resolvedTenantId,
       role: 'ADMIN',
       guard: 'admins',
       isSuperAdmin: !!admin.isSuperAdmin,
-      gymName: tenant.name,
+      gymName,
     };
 
     const { accessToken, refreshTokenEntity, refreshToken } = this.buildTokenPair(
       payload,
       'ADMIN',
-      tenantId,
+      resolvedTenantId,
       String(admin.id),
     );
     await this.refreshTokenRepo.save(refreshTokenEntity);
@@ -243,12 +388,15 @@ export class AuthService {
       accessToken,
       refreshToken,
       expiresIn: this.configService.get<string>('JWT_EXPIRATION', '24h'),
+      role: 'ADMIN' as const,
+      tenantId: resolvedTenantId,
+      gymName: gymName ?? null,
       user: {
         id: String(admin.id),
         email: admin.email,
         firstName: admin.firstName,
         lastName: admin.lastName,
-        gymName: tenant.name,
+        gymName: gymName ?? null,
         isSuperAdmin: !!admin.isSuperAdmin,
         isOwner: false,
       },
@@ -264,20 +412,19 @@ export class AuthService {
   }) {
     const tenantId = this.request.tenantId;
 
-    // Check if user already exists
     let user = await this.userRepo.findOne({ where: { email: dto.email } });
-    
+    let hashedPassword: string;
+
     if (user) {
-      // S'il existe, vérifier s'il est déjà dans ce tenant
       const existingMembership = await this.tenantUserRepo.findOne({
-        where: { tenantId, globalUserId: user.globalId }
+        where: { tenantId, globalUserId: user.globalId },
       });
       if (existingMembership) {
         throw new BadRequestException('User with this email already exists in this tenant.');
       }
+      hashedPassword = user.password;
     } else {
-      // Créer un nouvel utilisateur global
-      const hashedPassword = await bcrypt.hash(dto.passwordHash, 10);
+      hashedPassword = await bcrypt.hash(dto.passwordHash, 10);
       user = this.userRepo.create({
         globalId: uuidv4(),
         email: dto.email,
@@ -291,12 +438,26 @@ export class AuthService {
       user = await this.userRepo.save(user);
     }
 
-    // Associer l'utilisateur au tenant
     const tenantUser = this.tenantUserRepo.create({
       tenantId: tenantId,
       globalUserId: user.globalId,
     });
     await this.tenantUserRepo.save(tenantUser);
+
+    // Synchronise le membre dans la base de la salle (tenant_xxx.users) → visible côté web
+    try {
+      await this.tenantMembersService.createTenantMember(tenantId, {
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        email: dto.email,
+        phoneNumber: dto.phoneNumber,
+        passwordHash: hashedPassword,
+        globalId: user.globalId,
+      });
+    } catch (err) {
+      // Ne bloque pas l'inscription centrale si la synchro tenant échoue
+      // (le membre reste connectable côté mobile).
+    }
 
     this.eventEmitter.emit('member.created', {
       tenantId,
@@ -325,17 +486,14 @@ export class AuthService {
       throw new UnauthorizedException('Refresh token has expired. Please log in again.');
     }
 
-    // Cross-tenant verification
     const requestTenantId = this.request.tenantId;
     if (requestTenantId && tokenEntity.tenantId !== requestTenantId) {
       throw new UnauthorizedException('Refresh token does not belong to the requested tenant.');
     }
 
-    // Revoke old token (rotation)
     tokenEntity.revokedAt = new Date();
     await this.refreshTokenRepo.save(tokenEntity);
 
-    // Build new token pair
     const payload = {
       sub: tokenEntity.userId,
       tenantId: tokenEntity.tenantId,
@@ -348,7 +506,9 @@ export class AuthService {
         (payload as any).guard = 'owners';
         (payload as any).email = owner.email;
       } else {
-        const admin = await this.adminRepo.findOne({ where: { id: parseInt(tokenEntity.userId, 10) as any } });
+        const admin = await this.adminRepo.findOne({
+          where: { id: parseInt(tokenEntity.userId, 10) as any },
+        });
         if (admin) {
           (payload as any).guard = 'admins';
           (payload as any).isSuperAdmin = !!admin.isSuperAdmin;
@@ -392,14 +552,16 @@ export class AuthService {
       .createQueryBuilder()
       .update(RefreshToken)
       .set({ revokedAt: new Date() })
-      .where('userId = :userId AND tenantId = :tenantId AND revokedAt IS NULL', { userId, tenantId })
+      .where('userId = :userId AND tenantId = :tenantId AND revokedAt IS NULL', {
+        userId,
+        tenantId,
+      })
       .execute();
   }
 
   async forgotPassword(email: string): Promise<{ message: string; resetToken?: string }> {
     const user = await this.userRepo.findOne({ where: { email, isActive: true } });
 
-    // Always return success to avoid email enumeration
     if (!user) {
       return { message: 'If that email is registered, a reset link has been sent.' };
     }
@@ -407,7 +569,6 @@ export class AuthService {
     const rawToken = crypto.randomBytes(32).toString('hex');
     const hashedToken = await bcrypt.hash(rawToken, 10);
 
-    // Upsert reset token
     const existing = await this.passwordResetRepo.findOne({ where: { email } });
     if (existing) {
       existing.token = hashedToken;
@@ -418,7 +579,6 @@ export class AuthService {
       await this.passwordResetRepo.save(resetRecord);
     }
 
-    // In production, send email here. For now return token in dev mode.
     const isDev = this.configService.get<string>('NODE_ENV') !== 'production';
     return {
       message: 'If that email is registered, a reset link has been sent.',
@@ -426,18 +586,23 @@ export class AuthService {
     };
   }
 
-  async resetPassword(email: string, rawToken: string, newPassword: string): Promise<{ message: string }> {
+  async resetPassword(
+    email: string,
+    rawToken: string,
+    newPassword: string,
+  ): Promise<{ message: string }> {
     const resetRecord = await this.passwordResetRepo.findOne({ where: { email } });
 
     if (!resetRecord) {
       throw new BadRequestException('Invalid or expired password reset token.');
     }
 
-    // Token expires after 60 minutes
     const tokenAge = Date.now() - new Date(resetRecord.createdAt).getTime();
     if (tokenAge > 60 * 60 * 1000) {
       await this.passwordResetRepo.delete({ email });
-      throw new BadRequestException('Password reset token has expired. Please request a new one.');
+      throw new BadRequestException(
+        'Password reset token has expired. Please request a new one.',
+      );
     }
 
     const isValid = await bcrypt.compare(rawToken, resetRecord.token);
@@ -453,13 +618,9 @@ export class AuthService {
     user.password = await bcrypt.hash(newPassword, 10);
     await this.userRepo.save(user);
 
-    // Delete used reset token
     await this.passwordResetRepo.delete({ email });
-
-    // Revoke all refresh tokens for security
     await this.revokeAllUserTokens(user.globalId, this.request.tenantId ?? '');
 
     return { message: 'Password reset successfully. Please log in with your new password.' };
   }
 }
-

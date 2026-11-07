@@ -25,14 +25,37 @@ export class AdminController {
 
   // ─── Members CRUD ────────────────────────────────────────────────────────────
 
-  /** GET /admin/members?page=1&limit=15&search=John */
+  /** GET /admin/members?page=1&limit=15&search=John&status=active */
   @Get('members')
   getMembers(
     @Query('page',  new DefaultValuePipe(1),  ParseIntPipe) page: number,
     @Query('limit', new DefaultValuePipe(15), ParseIntPipe) limit: number,
     @Query('search') search?: string,
+    @Query('status') status?: 'all' | 'active' | 'inactive',
   ) {
-    return this.adminService.getMembers(page, limit, search);
+    return this.adminService.getMembers(page, limit, search, status ?? 'all');
+  }
+
+  /** GET /admin/members/export?search=&status= — export CSV de tous les membres filtrés */
+  @Get('members/export')
+  exportMembers(
+    @Query('search') search?: string,
+    @Query('status') status?: 'all' | 'active' | 'inactive',
+  ) {
+    return this.adminService.exportMembersCsv(search, status ?? 'all');
+  }
+
+  /**
+   * GET /admin/members/export-token?search=&status=
+   * Renvoie un jeton court pour télécharger le CSV comme vrai fichier via le
+   * navigateur (route publique /admin/members/export/download?token=...).
+   */
+  @Get('members/export-token')
+  exportMembersToken(
+    @Query('search') search?: string,
+    @Query('status') status?: 'all' | 'active' | 'inactive',
+  ) {
+    return this.adminService.generateExportToken(search, status ?? 'all');
   }
 
   /** GET /admin/members/:id */

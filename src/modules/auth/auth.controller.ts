@@ -27,6 +27,16 @@ class LoginDto {
   pass: string;
 }
 
+class PhoneLoginDto {
+  @IsString()
+  @IsNotEmpty()
+  phoneNumber: string;
+
+  @IsString()
+  @IsNotEmpty()
+  pass: string;
+}
+
 class RegisterDto {
   @IsEmail()
   @IsNotEmpty()
@@ -46,8 +56,8 @@ class RegisterDto {
   password: string;
 
   @IsString()
-  @IsOptional()
-  phoneNumber?: string;
+  @IsNotEmpty()
+  phoneNumber: string;
 }
 
 class RefreshTokenDto {
@@ -91,6 +101,13 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async login(@Body() dto: LoginDto) {
     return this.authService.login(dto.email, dto.pass);
+  }
+
+  /** Login membre par téléphone — résout automatiquement la salle, sinon VISITOR */
+  @Post('login-phone')
+  @HttpCode(HttpStatus.OK)
+  async loginByPhone(@Body() dto: PhoneLoginDto) {
+    return this.authService.loginByPhone(dto.phoneNumber, dto.pass);
   }
 
   /** Alias for mobile apps that send POST /auth/users/login (member guard) */
